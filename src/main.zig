@@ -1,79 +1,14 @@
 const std = @import("std");
 
-const IDLE_INDEX = 4;
-const IOWAIT_INDEX = 5;
+const IDLE_INDEX = 3;
+const IOWAIT_INDEX = 4;
 
 const ThreadTimes = struct {
-    total: u32,
+    busy: u32,
     idle: u32,
 };
 
-fn getThreadTimes(line: []u8) !ThreadTimes {
-    var total: u32 = 0;
-    var idle: u32 = 0;
-
-    var iter = std.mem.splitSequence(u8, line, " ");
-    var i: i32 = 0;
-    std.debug.print("line :{s}", .{line});
-    while (iter.next()) |val| : (i += 1) {
-        if (i == 0) {
-            continue;
-        }
-        const int_val = std.fmt.parseUnsigned(u32, val, 10) catch |err| {
-            std.debug.print("parseint error: {any} value :>>{s}<<\n", .{ err, val });
-            continue;
-        };
-        if (i == IDLE_INDEX or i == IOWAIT_INDEX) {
-            idle += int_val;
-        }
-        total += int_val;
-    }
-    const ret = ThreadTimes{ .total = total, .idle = idle };
-    return ret;
-}
-
-fn getThreadNum() !u8 {
-    const f = std.fs.openFileAbsolute("/proc/stat", .{ .mode = .read_only }) catch |err| {
-        std.debug.print("error open {any}", .{err});
-        return err;
-    };
-    defer f.close();
-
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-
-    const alloc = gpa.allocator();
-    const file_buffer: []u8 = try alloc.alloc(u8, 1024 * 1024);
-    defer alloc.free(file_buffer);
-
-    var file_reader = f.reader(file_buffer);
-
-    var count: u8 = 0;
-
-    while (file_reader.interface.takeDelimiterExclusive('\n')) |line| {
-        file_reader.interface.toss(1);
-        if (!std.mem.startsWith(u8, line, "cpu")) {
-            continue;
-        }
-        if (line.len < 4) {
-            continue;
-        }
-        if (line[3] == ' ') {
-            continue;
-        }
-        count += 1;
-    } else |err| {
-        switch (err) {
-            error.EndOfStream => {},
-            error.ReadFailed, error.StreamTooLong => {
-                return err;
-            },
-        }
-    }
-    return count;
-}
-
-fn readProc(alloc: std.mem.Allocator, map: *std.StringHashMap(ThreadTimes)) !void {
+fn readProc(alloc: std.mem.Allocator) !std.StringHashMap(ThreadTimes) {
     const f = std.fs.openFileAbsolute("/proc/stat", .{ .mode = .read_only }) catch |err| {
         std.debug.print("error open {any}", .{err});
         return err;
@@ -84,6 +19,8 @@ fn readProc(alloc: std.mem.Allocator, map: *std.StringHashMap(ThreadTimes)) !voi
     defer alloc.free(file_buffer);
 
     var file_reader = f.reader(file_buffer);
+
+    var map: std.StringHashMap(ThreadTimes) = .init(alloc);
 
     while (file_reader.interface.takeDelimiterExclusive('\n')) |line| {
         file_reader.interface.toss(1);
@@ -100,26 +37,25 @@ fn readProc(alloc: std.mem.Allocator, map: *std.StringHashMap(ThreadTimes)) !voi
         var iter = std.mem.splitSequence(u8, line, " ");
         var i: i32 = 0;
 
-        var total: u32 = 0;
+        var busy: u32 = 0;
         var idle: u32 = 0;
 
         const key = iter.next() orelse {
             continue;
         };
+        const owned_key = try alloc.dupe(u8, key);
         while (iter.next()) |val| : (i += 1) {
-            if (i == 0) {
-                continue;
-            }
             const int_val = std.fmt.parseUnsigned(u32, val, 10) catch |err| {
                 std.debug.print("parseint error: {any} value :>>{s}<<\n", .{ err, val });
                 continue;
             };
             if (i == IDLE_INDEX or i == IOWAIT_INDEX) {
                 idle += int_val;
+            } else {
+                busy += int_val;
             }
-            total += int_val;
         }
-        try map.put(key, .{ .idle = idle, .total = total });
+        try map.put(owned_key, .{ .idle = idle, .busy = busy });
     } else |err| {
         switch (err) {
             error.EndOfStream => {},
@@ -128,6 +64,39 @@ fn readProc(alloc: std.mem.Allocator, map: *std.StringHashMap(ThreadTimes)) !voi
             },
         }
     }
+    return map;
+}
+
+fn cleanupMap(map: *std.StringHashMap(ThreadTimes), alloc: std.mem.Allocator) void {
+    var keyIterator = map.keyIterator();
+    while (keyIterator.next()) |key| {
+        alloc.free(key.*);
+    }
+    map.deinit();
+}
+
+fn visualizeData(prev: std.StringHashMap(ThreadTimes), current: std.StringHashMap(ThreadTimes)) void {
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+
+    var keyIterator = current.keyIterator();
+    while (keyIterator.next()) |key| {
+        const currentValue = current.get(key.*).?;
+        const prevValue = prev.get(key.*).?;
+        printBar(key.*, prevValue, currentValue, stdout);
+    }
+    stdout.flush() catch unreachable;
+}
+
+fn printBar(key: []const u8, prev: ThreadTimes, current: ThreadTimes, stdout: *std.Io.Writer) void {
+    const busy: f32 = @floatFromInt(current.busy - prev.busy);
+    const idle: f32 = @floatFromInt(current.idle - prev.idle);
+    const total = busy + idle;
+    // std.debug.print("{s}: {d}\n", .{ key, busy / total * 100 });
+
+    stdout.print("{s} {d}%\n", .{ key[3..], busy / total * 100 }) catch unreachable;
+
     return;
 }
 
@@ -137,7 +106,17 @@ pub fn main() !void {
 
     const alloc = gpa.allocator();
 
-    var current: std.StringHashMap(ThreadTimes) = .init(alloc);
-    _ = try readProc(alloc, &current);
-    std.debug.print("map: {any}", .{current});
+    var prev: ?std.StringHashMap(ThreadTimes) = null;
+    var current = try readProc(alloc);
+    defer {
+        cleanupMap(&current, alloc);
+        if (prev) |*p| cleanupMap(p, alloc);
+    }
+    while (true) {
+        std.Thread.sleep(std.time.ns_per_s);
+        if (prev) |*p| cleanupMap(p, alloc);
+        prev = current;
+        current = try readProc(alloc);
+        visualizeData(prev.?, current);
+    }
 }
