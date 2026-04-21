@@ -1,5 +1,25 @@
 const std = @import("std");
 
+// const Ansi = enum {
+//     reset,
+//     clear,
+//     red,
+//     green,
+//     yellow,
+//     cyan,
+//
+//     pub fn format(self: Ansi, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+//         try writer.writeAll(switch (self) {
+//             .reset  => "\x1b[0m",
+//             .clear  => "\x1b[2J\x1b[H",
+//             .red    => "\x1b[31m",
+//             .green  => "\x1b[32m",
+//             .yellow => "\x1b[33m",
+//             .cyan   => "\x1b[36m",
+//         });
+//     }
+// };
+
 const IDLE_INDEX = 3;
 const IOWAIT_INDEX = 4;
 
@@ -93,9 +113,19 @@ fn printBar(key: []const u8, prev: ThreadTimes, current: ThreadTimes, stdout: *s
     const busy: f32 = @floatFromInt(current.busy - prev.busy);
     const idle: f32 = @floatFromInt(current.idle - prev.idle);
     const total = busy + idle;
-    // std.debug.print("{s}: {d}\n", .{ key, busy / total * 100 });
+    const percentage = busy / total * 100;
 
-    stdout.print("{s} {d}%\n", .{ key[3..], busy / total * 100 }) catch unreachable;
+    const barCharacter = '|';
+    const emptyCharacter = ' ';
+
+    const barLength: u8 = 10;
+    const filled: u8 = @intFromFloat(busy / total * barLength);
+
+    var bar: [barLength]u8 = undefined;
+    @memset(bar[0..filled], barCharacter);
+    @memset(bar[filled..], emptyCharacter);
+
+    stdout.print("{s}[{s}] {d:.1}%\n", .{ key[3..], bar, percentage }) catch unreachable;
 
     return;
 }
