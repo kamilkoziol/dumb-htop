@@ -28,17 +28,17 @@ const ThreadTimes = struct {
     idle: u32,
 };
 
-fn readProc(alloc: std.mem.Allocator) !std.StringHashMap(ThreadTimes) {
-    const f = std.fs.openFileAbsolute("/proc/stat", .{ .mode = .read_only }) catch |err| {
+fn readProc(alloc: std.mem.Allocator, io: std.Io) !std.StringHashMap(ThreadTimes) {
+    const f = std.Io.Dir.openFileAbsolute(io, "/proc/stat", .{ .mode = .read_only }) catch |err| {
         std.debug.print("error open {any}", .{err});
         return err;
     };
-    defer f.close();
+    defer f.close(io);
 
     const file_buffer: []u8 = try alloc.alloc(u8, 1024 * 1024);
     defer alloc.free(file_buffer);
 
-    var file_reader = f.reader(file_buffer);
+    var file_reader = f.reader(io, file_buffer);
 
     var map: std.StringHashMap(ThreadTimes) = .init(alloc);
 
@@ -95,9 +95,9 @@ fn cleanupMap(map: *std.StringHashMap(ThreadTimes), alloc: std.mem.Allocator) vo
     map.deinit();
 }
 
-fn visualizeData(prev: std.StringHashMap(ThreadTimes), current: std.StringHashMap(ThreadTimes)) void {
+fn visualizeData(io: std.Io, prev: std.StringHashMap(ThreadTimes), current: std.StringHashMap(ThreadTimes)) void {
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
     var keyIterator = current.keyIterator();
@@ -130,23 +130,23 @@ fn printBar(key: []const u8, prev: ThreadTimes, current: ThreadTimes, stdout: *s
     return;
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
 
     const alloc = gpa.allocator();
 
     var prev: ?std.StringHashMap(ThreadTimes) = null;
-    var current = try readProc(alloc);
+    var current = try readProc(alloc, init.io);
     defer {
         cleanupMap(&current, alloc);
         if (prev) |*p| cleanupMap(p, alloc);
     }
     while (true) {
-        std.Thread.sleep(std.time.ns_per_s);
+        try std.Io.sleep(init.io, std.Io.Duration.fromSeconds(1), std.Io.Clock.real);
         if (prev) |*p| cleanupMap(p, alloc);
         prev = current;
-        current = try readProc(alloc);
-        visualizeData(prev.?, current);
+        current = try readProc(alloc, init.io);
+        visualizeData(init.io, prev.?, current);
     }
 }
