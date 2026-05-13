@@ -9,6 +9,9 @@ const Ansi = enum {
     cyan,
     altOn,
     altOff,
+    hideCursor,
+    moveCursorHome,
+    eraseEntireScreen,
 
     pub fn format(self: Ansi, writer: *std.Io.Writer) !void {
         try writer.writeAll(switch (self) {
@@ -20,6 +23,9 @@ const Ansi = enum {
             .cyan => "\x1b[36m",
             .altOn => "\x1b[?1049h",
             .altOff => "\x1b[?1049l",
+            .hideCursor => "\x1b[?25l",
+            .moveCursorHome => "\x1b[H",
+            .eraseEntireScreen => "\x1b[2J",
         });
     }
 };
@@ -36,6 +42,12 @@ const TerminalSize = struct {
     width: u16,
     height: u16,
 };
+
+fn handleSigint(sig: std.os.linux.SIG) callconv(.c) void {
+    _ = sig;
+    _ = std.os.linux.write(std.posix.STDOUT_FILENO, "\x1b[?1049l\x1b[?25h", 14);
+    std.process.exit(0);
+}
 
 fn getTerminalSize() TerminalSize {
     var winSize: std.posix.winsize = undefined;
@@ -138,7 +150,7 @@ fn printBar(key: u16, prev: ?ThreadTimes, current: ?ThreadTimes, stdout: *std.Io
     @memset(bar[0..filled], barCharacter);
     @memset(bar[filled..], emptyCharacter);
 
-    stdout.print("{d}[{s}] {d:.1}%\n", .{ key, bar, percentage }) catch unreachable;
+    stdout.print("{d: <2}[{s}] {d:.1}%\n", .{ key, bar, percentage }) catch unreachable;
 
     return;
 }
@@ -157,13 +169,26 @@ pub fn main(init: std.process.Init) !void {
     var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    stdout.print("{f}", .{Ansi.altOn});
+    const sa = std.posix.Sigaction{
+        .handler = .{ .handler = handleSigint },
+        .mask = std.os.linux.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.INT, &sa, null);
 
+    // enable alternate buffer
+    try stdout.print("{f}", .{Ansi.altOn});
+    // hide cursor
+    try stdout.print("{f}", .{Ansi.hideCursor});
+    //move cursor to home
+    try stdout.print("{f}", .{Ansi.moveCursorHome});
     while (true) {
         try std.Io.sleep(init.io, std.Io.Duration.fromSeconds(1), std.Io.Clock.real);
         if (prev) |*p| cleanupMap(p);
         prev = current;
         current = try readProc(alloc, init.io);
+        try stdout.print("{f}", .{Ansi.eraseEntireScreen});
+        try stdout.print("{f}", .{Ansi.moveCursorHome});
         visualizeData(stdout, prev.?, current);
         try stdout.flush();
     }
