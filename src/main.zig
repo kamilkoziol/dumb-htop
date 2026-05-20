@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const DumbHtopError = error{HostnameNotFound};
+
 const Ansi = enum {
     reset,
     clear,
@@ -12,6 +14,10 @@ const Ansi = enum {
     hideCursor,
     moveCursorHome,
     eraseEntireScreen,
+    color1,
+    color2,
+    color3,
+    dim,
 
     pub fn format(self: Ansi, writer: *std.Io.Writer) !void {
         try writer.writeAll(switch (self) {
@@ -26,6 +32,10 @@ const Ansi = enum {
             .hideCursor => "\x1b[?25l",
             .moveCursorHome => "\x1b[H",
             .eraseEntireScreen => "\x1b[2J",
+            .color1 => "\x1b[31m",
+            .color2 => "\x1b[35m",
+            .color3 => "\x1b[36m",
+            .dim => "\x1b[2m",
         });
     }
 };
@@ -150,13 +160,34 @@ fn printBar(key: u16, prev: ?ThreadTimes, current: ?ThreadTimes, stdout: *std.Io
     @memset(bar[0..filled], barCharacter);
     @memset(bar[filled..], emptyCharacter);
 
-    stdout.print("{d: <2}[{s}] {d:.1}%\n", .{ key, bar, percentage }) catch unreachable;
+    stdout.print("{f}{d: <2}{f}[{f}{s}{f}] {f}{d:.1}%{f}\n", .{ Ansi.color3, key, Ansi.reset, Ansi.color1, bar, Ansi.reset, Ansi.color2, percentage, Ansi.reset }) catch unreachable;
 
     return;
 }
 
+fn getHostname(alloc: std.mem.Allocator, init: std.process.Init) ![]const u8 {
+    const argv = [_][]const u8{"hostname"};
+    const hostnameProg = std.process.run(alloc, init.io, .{ .argv = &argv });
+    if (hostnameProg) |hostname| {
+        return hostname.stdout;
+    } else |_| {}
+
+    const hostnameEnv = init.environ_map.get("HOSTNAME");
+    if (hostnameEnv) |hostname| {
+        return hostname;
+    }
+    const hostEnv = init.environ_map.get("HOST");
+    if (hostEnv) |host| {
+        return host;
+    } else {
+        return DumbHtopError.HostnameNotFound;
+    }
+}
+
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
+
+    const hostname = try getHostname(alloc, init);
 
     var prev: ?std.AutoHashMap(u16, ThreadTimes) = null;
     var current = try readProc(alloc, init.io);
@@ -189,6 +220,7 @@ pub fn main(init: std.process.Init) !void {
         current = try readProc(alloc, init.io);
         try stdout.print("{f}", .{Ansi.eraseEntireScreen});
         try stdout.print("{f}", .{Ansi.moveCursorHome});
+        try stdout.print("{f}CPU usage on {f}{s}\n{f}", .{ Ansi.dim, Ansi.color2, hostname, Ansi.reset });
         visualizeData(stdout, prev.?, current);
         try stdout.flush();
     }
